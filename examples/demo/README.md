@@ -49,7 +49,20 @@ errors: 0
 Full machine-readable copies: [`summary-74.json`](summary-74.json),
 [`results-74.json`](results-74.json).
 
-## The 3,655-file big run
+## The superseded 3,655-file big run (kept for provenance)
+
+> [!NOTE]
+> **Superseded (2026-10-05):** a later, larger run — **33,405 files** (ruff's
+> full fixture tree, 1,609 files, + the Python 3.13 framework stdlib incl.
+> site-packages, 31,796 files) — is documented in
+> [`findings/2026-10-05-full-fixtures-stdlib.md`](../../findings/2026-10-05-full-fixtures-stdlib.md)
+> with [`summary-full-fixtures.json`](summary-full-fixtures.json) and
+> [`summary-full-stdlib.json`](summary-full-stdlib.json). Verdict there:
+> convergence 12→10 failures (all 12 base-side failures fixed by the patch),
+> zero non-idempotence anywhere, all 47 diffs pre-existing, and the same known
+> indented/trailing-comment signature behind every patched-side failure.
+> The numbers below are an intermediate run captured mid-investigation and
+> remain accurate for the corpora it used.
 
 The 74-file run was followed by a full-scale corpus (ruff test fixtures +
 CPython `Lib/` checkout, 3,655 files) — see

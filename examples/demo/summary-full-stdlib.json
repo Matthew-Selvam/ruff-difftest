@@ -1,0 +1,12 @@
+{
+  "corpus_size": 31796,
+  "select": "E301,E302,E303,E304,E305,E306,I001",
+  "base_converge_failures": 9,
+  "fixed_converge_failures": 8,
+  "base_non_idempotent": 0,
+  "fixed_non_idempotent": 0,
+  "differing_files": 41,
+  "diffs_formatter_disagrees_both": 41,
+  "diffs_formatter_disagrees_only_fixed": 0,
+  "errors": 0
+}

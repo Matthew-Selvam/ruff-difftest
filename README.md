@@ -11,7 +11,10 @@
 
 **On its first real run — 74 fixture files — it found a convergence bug that
 passes all 2,836 tests in ruff's own suite.**
-[Read the write-up](findings/2026-10-05-e302-indented-comment-nonconvergence.md)
+Its largest run to date: **33,405 files** (ruff's full fixture tree + the
+Python 3.13 stdlib incl. site-packages) —
+[read the results](findings/2026-10-05-full-fixtures-stdlib.md).
+[Read the original find](findings/2026-10-05-e302-indented-comment-nonconvergence.md)
 ·
 [6-line repro](repro/case_indented_comment.py)
 
