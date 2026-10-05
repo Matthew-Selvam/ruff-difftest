@@ -21,8 +21,8 @@ jobs:
     name: Lint & parse
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@08c6ba3d6e36ecf78e122f491f4a2e2c5bfdff46 # v5.0.0
-      - uses: astral-sh/setup-uv@559e68bee12d2f5f632d97aa3b6760494bc26aa0 # v7.1.4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -39,8 +39,8 @@ jobs:
     name: Pytest suite
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@08c6ba3d6e36ecf78e122f491f4a2e2c5bfdff46 # v5.0.0
-      - uses: astral-sh/setup-uv@559e68bee12d2f5f632d97aa3b6760494bc26aa0 # v7.1.4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -60,10 +60,10 @@ jobs:
           - build: macos-x86_64
             os: macos-15-intel
     steps:
-      - uses: actions/checkout@08c6ba3d6e36ecf78e122f491f4a2e2c5bfdff46 # v5.0.0
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Install Rust toolchain (stable)
-        uses: dtolnay/rust-toolchain@1e75b1e406c1ea1a7ef0695867a47f6bca462b70 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: stable
           profile: minimal
@@ -75,7 +75,7 @@ jobs:
           enable-cache: true
 
       - name: Restore cargo registry/cache
-        uses: actions/cache@0057852bfaa89a5674548fd461fb8ac264216e25 # v4.4.0
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
