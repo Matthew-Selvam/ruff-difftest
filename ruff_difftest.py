@@ -71,10 +71,18 @@ class Report:
         return {
             "corpus_size": self.corpus_size,
             "select": self.select,
-            "base_converge_failures": sum(1 for r in self.results if r.base_converge_fail),
-            "fixed_converge_failures": sum(1 for r in self.results if r.fixed_converge_fail),
-            "base_non_idempotent": sum(1 for r in self.results if r.base_non_idempotent),
-            "fixed_non_idempotent": sum(1 for r in self.results if r.fixed_non_idempotent),
+            "base_converge_failures": sum(
+                1 for r in self.results if r.base_converge_fail
+            ),
+            "fixed_converge_failures": sum(
+                1 for r in self.results if r.fixed_converge_fail
+            ),
+            "base_non_idempotent": sum(
+                1 for r in self.results if r.base_non_idempotent
+            ),
+            "fixed_non_idempotent": sum(
+                1 for r in self.results if r.fixed_non_idempotent
+            ),
             "differing_files": len(diffs),
             "diffs_formatter_disagrees_both": sum(
                 1 for r in diffs if r.base_format_disagrees and r.fixed_format_disagrees
@@ -113,16 +121,18 @@ def run_ruff(
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def fix_snapshot(binary: Path, file_copy: Path, select: str, config: Path) -> tuple[str, bool]:
+def fix_snapshot(
+    binary: Path, file_copy: Path, select: str, config: Path
+) -> tuple[str, bool]:
     """Fix file_copy in place; return (final content, converged)."""
-    code, _out, err = run_ruff(binary, file_copy.parent, select, config)
+    _code, _out, err = run_ruff(binary, file_copy.parent, select, config)
     converged = FAILURES_HELP not in err
     return file_copy.read_text(encoding="utf-8", errors="replace"), converged
 
 
 def format_output(binary: Path, workdir: Path, config: Path) -> str:
     """Run `ruff format` over workdir and return the formatted content."""
-    proc = subprocess.run(
+    subprocess.run(
         [str(binary), "format", ".", "--config", str(config)],
         cwd=workdir,
         capture_output=True,
@@ -135,7 +145,13 @@ def format_output(binary: Path, workdir: Path, config: Path) -> str:
 
 
 def check_file(
-    rel: str, corpus: Path, base: Path, fixed: Path, select: str, config_src: Path, scratch: Path
+    rel: str,
+    corpus: Path,
+    base: Path,
+    fixed: Path,
+    select: str,
+    config_src: Path,
+    scratch: Path,
 ) -> FileResult:
     """Run the full base-vs-fixed comparison for one corpus file."""
     result = FileResult(path=rel)
@@ -148,13 +164,17 @@ def check_file(
             workdir.mkdir()
             shutil.copy2(src, workdir / src.name)
             shutil.copy2(config_src, workdir / "ruff.toml")
-            first, converged = fix_snapshot(binary, workdir / src.name, select, workdir / "ruff.toml")
+            first, converged = fix_snapshot(
+                binary, workdir / src.name, select, workdir / "ruff.toml"
+            )
             if not converged:
                 if name == "base":
                     result.base_converge_fail = True
                 else:
                     result.fixed_converge_fail = True
-            second, _ = fix_snapshot(binary, workdir / src.name, select, workdir / "ruff.toml")
+            second, _ = fix_snapshot(
+                binary, workdir / src.name, select, workdir / "ruff.toml"
+            )
             if first != second:
                 if name == "base":
                     result.base_non_idempotent = True
@@ -169,7 +189,9 @@ def check_file(
                 shutil.copy2(src, workdir / src.name)
                 shutil.copy2(config_src, workdir / "ruff.toml")
                 fix_snapshot(binary, workdir / src.name, select, workdir / "ruff.toml")
-                unformatted = (workdir / src.name).read_text(encoding="utf-8", errors="replace")
+                unformatted = (workdir / src.name).read_text(
+                    encoding="utf-8", errors="replace"
+                )
                 formatted = format_output(binary, workdir, workdir / "ruff.toml")
                 disagrees = unformatted != formatted
                 if name == "base":
@@ -196,8 +218,14 @@ def mode_run(args: argparse.Namespace) -> int:
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
             futures = [
                 pool.submit(
-                    check_file, rel, corpus, args.base.resolve(), args.fixed.resolve(),
-                    args.select, config_src, scratch_root,
+                    check_file,
+                    rel,
+                    corpus,
+                    args.base.resolve(),
+                    args.fixed.resolve(),
+                    args.select,
+                    config_src,
+                    scratch_root,
                 )
                 for rel in files
             ]
@@ -272,7 +300,7 @@ def mode_collect(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> int:
+def main_with_argv(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="mode", required=True)
 
@@ -291,8 +319,12 @@ def main() -> int:
     p_col.add_argument("--max-per-root", type=int, default=None)
     p_col.set_defaults(func=mode_collect)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     return args.func(args)
+
+
+def main() -> int:
+    return main_with_argv(sys.argv[1:])
 
 
 if __name__ == "__main__":

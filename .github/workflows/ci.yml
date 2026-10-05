@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: 0.9.5
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  lint:
+    name: Lint & parse
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@08c6ba3d6e36ecf78e122f491f4a2e2c5bfdff46 # v5.0.0
+      - uses: astral-sh/setup-uv@559e68bee12d2f5f632d97aa3b6760494bc26aa0 # v7.1.4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Ruff lint and format check
+        run: |
+          uv run --with ruff -- ruff check .
+          uv run --with ruff -- ruff format --check .
+      - name: Script entrypoint and subcommands parse
+        run: |
+          uv run ruff_difftest.py collect --help
+          uv run ruff_difftest.py run --help
+
+  tests:
+    name: Pytest suite
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@08c6ba3d6e36ecf78e122f491f4a2e2c5bfdff46 # v5.0.0
+      - uses: astral-sh/setup-uv@559e68bee12d2f5f632d97aa3b6760494bc26aa0 # v7.1.4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Run pytest (hermetic, fake binaries)
+        run: uv run --with pytest -- pytest tests/ -q
+
+  difftest:
+    name: Differential test / ${{ matrix.build }}
+    needs: lint
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - build: linux-x86_64
+            os: ubuntu-24.04
+          - build: macos-x86_64
+            os: macos-15-intel
+    steps:
+      - uses: actions/checkout@08c6ba3d6e36ecf78e122f491f4a2e2c5bfdff46 # v5.0.0
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@1e75b1e406c1ea1a7ef0695867a47f6bca462b70 # stable
+        with:
+          toolchain: stable
+          profile: minimal
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@559e68bee12d2f5f632d97aa3b6760494bc26aa0 # v7.1.4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Restore cargo registry/cache
+        uses: actions/cache@0057852bfaa89a5674548fd461fb8ac264216e25 # v4.4.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ matrix.build }}
+
+      - name: Build base (astral-sh/ruff @ 8b83731)
+        working-directory: ${{ runner.temp }}
+        run: |
+          git clone --filter=blob:none --single-branch https://github.com/astral-sh/ruff ruff
+          cd ruff
+          git checkout -q 8b83731
+          cargo build --bin ruff --locked
+          cp target/debug/ruff "$GITHUB_WORKSPACE/ruff_base"
+          "$GITHUB_WORKSPACE/ruff_base" --version
+
+      - name: Build fixed (fork branch with the E302 change)
+        working-directory: ${{ runner.temp }}
+        run: |
+          git clone --filter=blob:none --single-branch \
+            --branch fix/e302-comment-block-insertion \
+            https://github.com/Matthew-Selvam/ruff ruff-fork
+          cd ruff-fork
+          cargo build --bin ruff --locked
+          cp target/debug/ruff "$GITHUB_WORKSPACE/ruff_fixed"
+          "$GITHUB_WORKSPACE/ruff_fixed" --version
+
+      - name: Collect corpus from ruff's own fixtures at the base commit
+        run: |
+          cd "$RUNNER_TEMP/ruff"
+          git archive 8b83731 | tar -x -C "$RUNNER_TEMP/ruff"
+          git log -1 --format='fixtures at %h (%ci)'
+          cd "$GITHUB_WORKSPACE"
+          uv run ruff_difftest.py collect --out "$RUNNER_TEMP/corpus" \
+            --roots "$RUNNER_TEMP/ruff/crates/ruff_linter/resources/test/fixtures" \
+            --max-per-root 300
+
+      - name: Run differential test
+        run: |
+          uv run ruff_difftest.py run \
+            --corpus "$RUNNER_TEMP/corpus" \
+            --base "$GITHUB_WORKSPACE/ruff_base" \
+            --fixed "$GITHUB_WORKSPACE/ruff_fixed" \
+            --select E301,E302,E303,E304,E305,E306,I001 \
+            --jobs 4 \
+            --report "$GITHUB_WORKSPACE/difftest-report"
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: difftest-report-${{ matrix.build }}
+          path: difftest-report/
+          if-no-files-found: warn
