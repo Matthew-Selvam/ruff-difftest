@@ -11,6 +11,11 @@ This shape — an *indented* comment trailing a function body — slips through
 both, and the patched build fails to converge on it while unpatched converges
 in one pass.
 
+(Corpus provenance: the 74-file corpus is 73 upstream pycodestyle fixtures
+plus `E30_comment_before_definition.py`, which the branch itself adds — it is
+not an upstream fixture, so the base build's converge-failure on it is the
+patch's own regression test failing on unpatched code, exactly as designed.)
+
 ## Minimal repro
 
 `repro/case_indented_comment.py`:
@@ -44,7 +49,7 @@ satisfies E302 without disturbing anything else. The indented comment stays
 with the body it is written in.
 
 **Patched (5882a3d)** — `debug error: Failed to converge after 100 iterations
-in case.py with rule codes E303`, 101 errors reported, 1 remaining after 100
+in case.py with rule codes E302`, 101 errors reported, 1 remaining after 100
 internal fix rounds:
 
 ```python

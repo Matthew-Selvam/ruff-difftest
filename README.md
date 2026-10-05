@@ -39,6 +39,11 @@ per build — and does the baseline attribution for you.
 | **Behavior drift** | Does the patched build's final output differ from base anywhere? |
 | **Attribution** | For every drift: does `check --fix` → `format` disagree in base too (pre-existing), or only in patched (candidate regression)? |
 
+`outputs_differ` includes files that fail to converge in either build — a
+non-converged build almost always ends with different output, so treat the
+drift count as an upper bound. The per-file flags in `results.json` separate
+convergence failures from true same-pipeline behavior changes.
+
 ## How it works
 
 ```mermaid
