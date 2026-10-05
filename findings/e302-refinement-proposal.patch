@@ -121,7 +121,7 @@ index 070dd69..89c923e 100644
      |
  
  E302 [*] Expected 2 blank lines, found 0
-@@ -220,10 +221,10 @@ E302 [*] Expected 2 blank lines, found 0
+@@ -220,10 +220,10 @@ E302 [*] Expected 2 blank lines, found 0
      |
  help: Add missing blank line(s)
      |
