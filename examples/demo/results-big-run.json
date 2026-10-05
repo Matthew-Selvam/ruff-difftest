@@ -1,0 +1,145 @@
+[
+  {
+    "path": "Lib/logging/__init__.py",
+    "base_converge_fail": false,
+    "fixed_converge_fail": false,
+    "base_non_idempotent": false,
+    "fixed_non_idempotent": false,
+    "outputs_differ": true,
+    "base_format_disagrees": true,
+    "fixed_format_disagrees": true,
+    "error": null
+  },
+  {
+    "path": "Lib/string.py",
+    "base_converge_fail": false,
+    "fixed_converge_fail": false,
+    "base_non_idempotent": false,
+    "fixed_non_idempotent": false,
+    "outputs_differ": true,
+    "base_format_disagrees": true,
+    "fixed_format_disagrees": true,
+    "error": null
+  },
+  {
+    "path": "Lib/tarfile.py",
+    "base_converge_fail": false,
+    "fixed_converge_fail": false,
+    "base_non_idempotent": false,
+    "fixed_non_idempotent": false,
+    "outputs_differ": true,
+    "base_format_disagrees": true,
+    "fixed_format_disagrees": true,
+    "error": null
+  },
+  {
+    "path": "Lib/test/_test_embed_structseq.py",
+    "base_converge_fail": true,
+    "fixed_converge_fail": false,
+    "base_non_idempotent": false,
+    "fixed_non_idempotent": false,
+    "outputs_differ": true,
+    "base_format_disagrees": true,
+    "fixed_format_disagrees": true,
+    "error": null
+  },
+  {
+    "path": "Lib/test/test_gc.py",
+    "base_converge_fail": false,
+    "fixed_converge_fail": false,
+    "base_non_idempotent": false,
+    "fixed_non_idempotent": false,
+    "outputs_differ": true,
+    "base_format_disagrees": true,
+    "fixed_format_disagrees": true,
+    "error": null
+  },
+  {
+    "path": "Lib/test/test_inspect/inspect_fodder.py",
+    "base_converge_fail": true,
+    "fixed_converge_fail": false,
+    "base_non_idempotent": false,
+    "fixed_non_idempotent": false,
+    "outputs_differ": true,
+    "base_format_disagrees": true,
+    "fixed_format_disagrees": true,
+    "error": null
+  },
+  {
+    "path": "Lib/test/test_smtplib.py",
+    "base_converge_fail": false,
+    "fixed_converge_fail": false,
+    "base_non_idempotent": false,
+    "fixed_non_idempotent": false,
+    "outputs_differ": true,
+    "base_format_disagrees": true,
+    "fixed_format_disagrees": true,
+    "error": null
+  },
+  {
+    "path": "flake8_return/RET503.py",
+    "base_converge_fail": true,
+    "fixed_converge_fail": false,
+    "base_non_idempotent": false,
+    "fixed_non_idempotent": false,
+    "outputs_differ": true,
+    "base_format_disagrees": true,
+    "fixed_format_disagrees": true,
+    "error": null
+  },
+  {
+    "path": "isort/insert_empty_lines.py",
+    "base_converge_fail": true,
+    "fixed_converge_fail": false,
+    "base_non_idempotent": false,
+    "fixed_non_idempotent": false,
+    "outputs_differ": true,
+    "base_format_disagrees": true,
+    "fixed_format_disagrees": true,
+    "error": null
+  },
+  {
+    "path": "pycodestyle/E30.py",
+    "base_converge_fail": false,
+    "fixed_converge_fail": true,
+    "base_non_idempotent": false,
+    "fixed_non_idempotent": false,
+    "outputs_differ": true,
+    "base_format_disagrees": true,
+    "fixed_format_disagrees": true,
+    "error": null
+  },
+  {
+    "path": "pycodestyle/E30_comment_before_definition.py",
+    "base_converge_fail": true,
+    "fixed_converge_fail": false,
+    "base_non_idempotent": false,
+    "fixed_non_idempotent": false,
+    "outputs_differ": true,
+    "base_format_disagrees": true,
+    "fixed_format_disagrees": true,
+    "error": null
+  },
+  {
+    "path": "pyupgrade/UP028_0.py",
+    "base_converge_fail": false,
+    "fixed_converge_fail": true,
+    "base_non_idempotent": false,
+    "fixed_non_idempotent": false,
+    "outputs_differ": true,
+    "base_format_disagrees": true,
+    "fixed_format_disagrees": true,
+    "error": null
+  },
+  {
+    "path": "ruff/RUF023.py",
+    "base_converge_fail": false,
+    "fixed_converge_fail": false,
+    "base_non_idempotent": false,
+    "fixed_non_idempotent": false,
+    "outputs_differ": true,
+    "base_format_disagrees": true,
+    "fixed_format_disagrees": true,
+    "error": null
+  }
+]

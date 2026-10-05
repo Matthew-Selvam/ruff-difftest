@@ -1,0 +1,24 @@
+[
+  {
+    "path": "E30.py",
+    "base_converge_fail": false,
+    "fixed_converge_fail": true,
+    "base_non_idempotent": false,
+    "fixed_non_idempotent": false,
+    "outputs_differ": true,
+    "base_format_disagrees": true,
+    "fixed_format_disagrees": true,
+    "error": null
+  },
+  {
+    "path": "E30_comment_before_definition.py",
+    "base_converge_fail": true,
+    "fixed_converge_fail": false,
+    "base_non_idempotent": false,
+    "fixed_non_idempotent": false,
+    "outputs_differ": true,
+    "base_format_disagrees": true,
+    "fixed_format_disagrees": true,
+    "error": null
+  }
+]

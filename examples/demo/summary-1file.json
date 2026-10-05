@@ -1,0 +1,12 @@
+{
+  "corpus_size": 1,
+  "select": "E302,E303",
+  "base_converge_failures": 0,
+  "fixed_converge_failures": 1,
+  "base_non_idempotent": 0,
+  "fixed_non_idempotent": 0,
+  "differing_files": 1,
+  "diffs_formatter_disagrees_both": 0,
+  "diffs_formatter_disagrees_only_fixed": 1,
+  "errors": 0
+}
