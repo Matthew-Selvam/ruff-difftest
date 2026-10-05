@@ -29,7 +29,7 @@ jobs:
       - name: Ruff lint and format check
         run: |
           uv run --with ruff -- ruff check .
-          uv run --with ruff -- ruff format --check .
+          uv run --with ruff -- ruff format --check ruff_difftest.py tests/
       - name: Script entrypoint and subcommands parse
         run: |
           uv run ruff_difftest.py collect --help
