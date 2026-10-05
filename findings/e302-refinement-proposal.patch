@@ -98,15 +98,9 @@ index 5eead58..0c2f8c7 100644
  }
  
 diff --git a/crates/ruff_linter/src/rules/pycodestyle/snapshots/ruff_linter__rules__pycodestyle__tests__blank-lines-top-level_E30.py.snap b/crates/ruff_linter/src/rules/pycodestyle/snapshots/ruff_linter__rules__pycodestyle__tests__blank-lines-top-level_E30.py.snap
-index 070dd69..89c923e 100644
+index 070dd69..feb68d9 100644
 --- a/crates/ruff_linter/src/rules/pycodestyle/snapshots/ruff_linter__rules__pycodestyle__tests__blank-lines-top-level_E30.py.snap
 +++ b/crates/ruff_linter/src/rules/pycodestyle/snapshots/ruff_linter__rules__pycodestyle__tests__blank-lines-top-level_E30.py.snap
-@@ -1,5 +1,5 @@
- ---
- source: crates/ruff_linter/src/rules/pycodestyle/mod.rs
- ---
- E302 [*] Expected 2 blank lines, found 0
-    --> E30.py:533:1
 @@ -202,10 +202,10 @@ E302 [*] Expected 2 blank lines, found 0
      |
  help: Add missing blank line(s)
