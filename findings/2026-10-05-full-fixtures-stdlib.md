@@ -5,6 +5,17 @@ base `8b83731` vs patched `5882a3d` (branch `fix/e302-comment-block-insertion`),
 select `E301,E302,E303,E304,E305,E306,I001`, `preview = true`,
 `--fix --unsafe-fixes`, two passes per build per file, `--jobs 8`.
 
+> [!NOTE]
+> **Review addendum (2026-10-05):** the refinement in
+> `e302-refinement-proposal.patch` was later run directly against 5 of the 8
+> newly-found patched-side failure files (`dill/source.py`,
+> `dill/tests/test_source.py`, tensorboard `data_provider_pb2_grpc.py`, torch
+> `common_methods_invocations.py`, opentelemetry `trace_service_pb2_grpc.py`):
+> zero convergence markers on both passes and byte-identical-to-base output on
+> every one. The "would cover all 8" prediction below is verified fact for
+> 5/8 sampled; the 3 untested opentelemetry siblings are the same
+> generator-produced shape (likely but not directly verified).
+
 Corpora (collected separately, per-corpus runs so partial results survive):
 
 - `/tmp/corpus-fix` — ruff's full fixture tree

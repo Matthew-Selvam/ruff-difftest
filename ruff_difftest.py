@@ -26,6 +26,11 @@ CPython stdlib checkout:
 
 Every worker starts from a fresh copy of the corpus file, so neither build's
 output can contaminate the other's run.
+
+A per-file `TimeoutExpired` or any other per-file exception is recorded in
+that file's result (error field / converge flags) instead of crashing the run
+and losing the whole report — a timeout is counted as a converge failure for
+that build, which is the safe direction to err in.
 """
 
 from __future__ import annotations
@@ -100,24 +105,31 @@ def run_ruff(
     binary: Path, workdir: Path, select: str, config: Path
 ) -> tuple[int, str, str]:
     """Run `check --fix --unsafe-fixes` on workdir and return (code, out, err)."""
-    proc = subprocess.run(
-        [
-            str(binary),
-            "check",
-            ".",
-            "--select",
-            select,
-            "--fix",
-            "--unsafe-fixes",
-            "--config",
-            str(config),
-        ],
-        cwd=workdir,
-        capture_output=True,
-        text=True,
-        timeout=FIX_TIMEOUT_S,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                str(binary),
+                "check",
+                ".",
+                "--select",
+                select,
+                "--fix",
+                "--unsafe-fixes",
+                "--config",
+                str(config),
+            ],
+            cwd=workdir,
+            capture_output=True,
+            text=True,
+            timeout=FIX_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # Sentinel stderr without the convergence marker: fix_snapshot will
+        # count this build as a converge failure for this file. A slow file
+        # is not the same as a non-converging one, but conflating them errs
+        # toward flagging rather than silently passing.
+        return -1, "", f"TIMEOUT after {FIX_TIMEOUT_S}s"
     return proc.returncode, proc.stdout, proc.stderr
 
 
@@ -132,14 +144,17 @@ def fix_snapshot(
 
 def format_output(binary: Path, workdir: Path, config: Path) -> str:
     """Run `ruff format` over workdir and return the formatted content."""
-    subprocess.run(
-        [str(binary), "format", ".", "--config", str(config)],
-        cwd=workdir,
-        capture_output=True,
-        text=True,
-        timeout=FIX_TIMEOUT_S,
-        check=False,
-    )
+    try:
+        subprocess.run(
+            [str(binary), "format", ".", "--config", str(config)],
+            cwd=workdir,
+            capture_output=True,
+            text=True,
+            timeout=FIX_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pass
     target = next(p for p in workdir.iterdir() if p.suffix == ".py")
     return target.read_text(encoding="utf-8", errors="replace")
 
@@ -230,10 +245,13 @@ def mode_run(args: argparse.Namespace) -> int:
                 for rel in files
             ]
             for i, fut in enumerate(futures, 1):
-                res = fut.result()
+                try:
+                    res = fut.result()
+                except Exception as exc:  # per-file failure must not kill the run
+                    res = FileResult(path=files[i - 1], error=f"EXC: {exc!r}")
                 report.results.append(res)
                 if i % 250 == 0 or i == len(files):
-                    print(f"  {i}/{len(files)} checked")
+                    print(f"  {i}/{len(files)} checked", flush=True)
     finally:
         shutil.rmtree(scratch_root, ignore_errors=True)
         config_src.unlink(missing_ok=True)
