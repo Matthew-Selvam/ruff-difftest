@@ -544,8 +544,8 @@ MUTATIONS = {
         "fixed_non_idempotent",
     ),
     "converge": (
-        "converged = FAILURES_HELP not in err",
-        "converged = True  # mutated: detection disabled",
+        "return read_target(file_copy), settled and FAILURES_HELP not in err, failure",
+        "return read_target(file_copy), True, None  # mutated: detection disabled",
         {"base_kwargs": {"check": "still"}, "fixed_kwargs": {"converge": True}},
         "fixed_converge_failures",
     ),

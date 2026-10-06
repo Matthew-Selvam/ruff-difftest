@@ -1,0 +1,80 @@
+==============================================================================
+logging/__init__.py
+  base   2 passes: ['clean', 'clean']
+  patched 2 passes: ['clean', 'clean']
+  identical: False   diff hunks: 2
+--- base
++++ patched
+@@ -200 +199,0 @@
+-
+@@ -203,0 +203 @@
++
+==============================================================================
+string.py
+  base   2 passes: ['clean', 'clean']
+  patched 2 passes: ['clean', 'clean']
+  identical: False   diff hunks: 2
+--- base
++++ patched
+@@ -34 +33,0 @@
+-
+@@ -35,0 +35 @@
++
+==============================================================================
+tarfile.py
+  base   2 passes: ['clean', 'clean']
+  patched 2 passes: ['clean', 'clean']
+  identical: False   diff hunks: 2
+--- base
++++ patched
+@@ -630,2 +629,0 @@
+-
+-
+@@ -632,0 +631 @@
++
+==============================================================================
+test/_test_embed_structseq.py
+  base   2 passes: ['CONVERGE-FAIL', 'CONVERGE-FAIL']
+  patched 2 passes: ['clean', 'clean']
+  identical: False   diff hunks: 1
+--- base
++++ patched
+@@ -8,0 +9 @@
++
+==============================================================================
+test/test_gc.py
+  base   2 passes: ['clean', 'clean']
+  patched 2 passes: ['clean', 'clean']
+  identical: False   diff hunks: 2
+--- base
++++ patched
+@@ -39 +38,0 @@
+-
+@@ -44,0 +44 @@
++
+==============================================================================
+test/test_inspect/inspect_fodder.py
+  base   2 passes: ['CONVERGE-FAIL', 'CONVERGE-FAIL']
+  patched 2 passes: ['clean', 'clean']
+  identical: False   diff hunks: 4
+--- base
++++ patched
+@@ -5,0 +6 @@
++# line 5
+@@ -7 +7,0 @@
+-# line 5
+@@ -43,0 +44 @@
++
+@@ -45 +45,0 @@
+-
+==============================================================================
+test/test_smtplib.py
+  base   2 passes: ['clean', 'clean']
+  patched 2 passes: ['clean', 'clean']
+  identical: False   diff hunks: 2
+--- base
++++ patched
+@@ -228 +227,0 @@
+-
+@@ -232,0 +232 @@
++

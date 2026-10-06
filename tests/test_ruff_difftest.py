@@ -1,163 +1,1164 @@
-"""Tests for ruff_difftest.py.
+"""Stdlib `unittest` suite for the ruff_difftest.py harness.
 
-Hermetic: every test drives the harness with fake ruff binaries built in
-tmp_path (see fake_ruff.py). No real ruff, no network, fully offline.
+Hermetic and fast: every "ruff binary" is a tiny executable Python script
+written into a temp dir at test time, with its behavior baked in at creation
+time (no environment variables, no shared state), so one harness invocation
+can compare two differently-behaving builds. No real ruff, no ruff checkout,
+no network, stdlib only.
 
-Run:  python3 -m pytest tests/ -q
+Fake binary modes (baked in as constants inside the generated script):
+
+    fix_kind          "normalize" -> `x=1` becomes `x = 1`   (default)
+                      "drift"     -> `x=1` becomes `x = 999`
+    append_each_run   append `# extra` on EVERY `check` run  (never idempotent)
+    converge_fail     write "Failed to converge after 100 iterations" to stderr
+    converge_on       only emit that marker for files whose name matches this glob
+    fmt_marker        `format` appends this line to the file (formatter disagrees)
+    sleep             sleep this many seconds first (timeout-path tests)
+    log               append received argv to this file (argv protocol assertions)
+
+Covers, at minimum: identical builds (no drift), output drift, converge
+failure attributed to the correct build only, non-idempotence, report JSON
+schema, and `collect`. Also covers the format-attribution logic, the
+per-file error path, and the run protocol (two `check` passes per build).
+
+Run:
+    cd /Users/matthewselvam/ruff-difftest
+    uv run python -m unittest discover -s tests -p 'test_ruff_difftest.py' -v
+
+Note: the unscoped `discover -s tests` also collects tests/test_harness.py,
+which imports pytest and therefore errors under a stdlib-only interpreter.
+That module is left untouched; scope discovery with -p to run this suite.
 """
 
 from __future__ import annotations
 
+import atexit
+import contextlib
+import hashlib
+import io
 import json
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
+import time
+import unittest
 from pathlib import Path
 
-import pytest
-
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 
-import ruff_difftest as h
-from tests.fake_ruff import (
-    harness_argv,
-    make_fake,
-    write_case,
-)
+import ruff_difftest as h  # noqa: E402
 
+# Keys the report contract promises (see README "Notes"). Asserted as a subset,
+# not an equality: the harness may add summary keys (it has, e.g. `regressions`)
+# without invalidating this suite.
+SUMMARY_KEYS = {
+    "corpus_size",
+    "select",
+    "base_converge_failures",
+    "fixed_converge_failures",
+    "base_non_idempotent",
+    "fixed_non_idempotent",
+    "differing_files",
+    "diffs_formatter_disagrees_both",
+    "diffs_formatter_disagrees_only_fixed",
+    "errors",
+}
 
-@pytest.fixture()
-def fakes(tmp_path):
-    """Common fake binaries and a one-file corpus."""
-    bin_ = tmp_path / "bin"
-    bin_.mkdir()
-    return {
-        "base": make_fake(bin_, "ruff_base", "clean"),
-        "clean": make_fake(bin_, "ruff_clean", "clean"),
-        "drift": make_fake(bin_, "ruff_drift", "drift"),
-        "converge": make_fake(bin_, "ruff_converge", "clean+converge"),
-        "nonidem": make_fake(bin_, "ruff_nonidem", "clean+nonidem"),
-        "fmt": make_fake(bin_, "ruff_fmt", "drift+fmt"),
-    }
-
-
-def run_harness(corpus, base, fixed, tmp_path, report=True):
-    report_dir = tmp_path / "report"
-    argv = harness_argv("run", corpus, base, fixed, report_dir if report else None)
-    code = h.main_with_argv(argv)
-    return code, report_dir
-
-
-def test_identical_builds_all_clean(tmp_path, fakes, capsys):
-    corpus = write_case(tmp_path / "corpus")
-    code, report = run_harness(corpus, fakes["base"], fakes["clean"], tmp_path)
-    assert code == 0
-    s = json.loads((report / "summary.json").read_text())
-    assert s["corpus_size"] == 1
-    assert s["base_converge_failures"] == 0
-    assert s["fixed_converge_failures"] == 0
-    assert s["differing_files"] == 0
-    assert s["errors"] == 0
-    # Nothing interesting -> empty results file
-    assert json.loads((report / "results.json").read_text()) == []
+RESULT_KEYS = {
+    "path",
+    "base_converge_fail",
+    "fixed_converge_fail",
+    "base_non_idempotent",
+    "fixed_non_idempotent",
+    "outputs_differ",
+    "base_format_disagrees",
+    "fixed_format_disagrees",
+    "error",
+}
 
 
-def test_output_drift_detected_and_attributed(tmp_path, fakes):
-    corpus = write_case(tmp_path / "corpus")
-    code, report = run_harness(corpus, fakes["base"], fakes["drift"], tmp_path)
-    assert code == 0
-    s = json.loads((report / "summary.json").read_text())
-    assert s["differing_files"] == 1
-    assert s["diffs_formatter_disagrees_both"] == 0
-    # drift is baked into check, not format: neither build's format disagrees
-    rows = json.loads((report / "results.json").read_text())
-    assert rows[0]["path"] == "case.py"
-    assert rows[0]["outputs_differ"] is True
-    assert rows[0]["base_format_disagrees"] is False
-    assert rows[0]["fixed_format_disagrees"] is False
+def assert_summary_keys(case, summary: dict) -> None:
+    """The promised summary keys must all be present (extras tolerated)."""
+    case.assertEqual(set(), SUMMARY_KEYS - set(summary), msg="missing summary keys")
 
 
-def test_convergence_failure_flagged(tmp_path, fakes):
-    corpus = write_case(tmp_path / "corpus")
-    code, report = run_harness(corpus, fakes["base"], fakes["converge"], tmp_path)
-    assert code == 0
-    s = json.loads((report / "summary.json").read_text())
-    assert s["fixed_converge_failures"] == 1
-    assert s["base_converge_failures"] == 0
+def assert_result_keys(case, row: dict) -> None:
+    """The promised per-file keys must all be present (extras tolerated)."""
+    case.assertEqual(set(), RESULT_KEYS - set(row), msg="missing result keys")
 
 
-def test_non_idempotence_flagged(tmp_path, fakes):
-    corpus = write_case(tmp_path / "corpus")
-    code, report = run_harness(corpus, fakes["base"], fakes["nonidem"], tmp_path)
-    assert code == 0
-    s = json.loads((report / "summary.json").read_text())
-    assert s["fixed_non_idempotent"] == 1
-    assert s["base_non_idempotent"] == 0
+FAKE_TEMPLATE = '''#!{interpreter}
+"""Fake ruff stand-in generated by tests/test_ruff_difftest.py."""
+import pathlib
+import re
+import sys
+import time
+
+FIX_KIND = {fix_kind!r}
+CONVERGE_FAIL = {converge_fail!r}
+CONVERGE_ON = {converge_on!r}
+APPEND_EACH_RUN = {append_each_run!r}
+FMT_MARKER = {fmt_marker!r}
+STDERR_TEXT = {stderr_text!r}
+SLEEP = {sleep!r}
+LOG = {log!r}
+
+_BARE_ASSIGN = re.compile(r"^([A-Za-z_]\\w*)=(\\d+)$", re.MULTILINE)
+
+args = sys.argv[1:]
+
+if LOG:
+    with open(LOG, "a", encoding="utf-8") as fh:
+        fh.write(" ".join(args) + "\\n")
+
+if SLEEP:
+    time.sleep(SLEEP)
+
+if not args:
+    sys.stderr.write("fake-ruff: no args\\n")
+    sys.exit(2)
 
 
-def test_formatter_disagreement_attribution(tmp_path, fakes):
-    corpus = write_case(tmp_path / "corpus")
-    # fixed both drifts on check AND disagrees on format; base only drifts on
-    # check -> the format disagreement must be attributed to patched-only.
-    code, report = run_harness(corpus, fakes["base"], fakes["fmt"], tmp_path)
-    assert code == 0
-    s = json.loads((report / "summary.json").read_text())
-    assert s["differing_files"] == 1
-    assert s["diffs_formatter_disagrees_only_fixed"] == 1
-    assert s["diffs_formatter_disagrees_both"] == 0
+def _apply_check(text):
+    # Emulate a linter fix pass over any bare `name = <int>` assignment, so the
+    # fake behaves the same on every corpus file regardless of its content.
+    if FIX_KIND == "drift":
+        text = _BARE_ASSIGN.sub(r"\\1 = 999", text)
+    else:
+        text = _BARE_ASSIGN.sub(r"\\1 = \\2", text)
+    if APPEND_EACH_RUN:
+        text = text.rstrip("\\n") + "\\n# extra\\n"
+    return text
 
 
-def test_empty_corpus_errors(tmp_path, fakes):
-    corpus = tmp_path / "empty"
-    corpus.mkdir()
-    argv = harness_argv("run", corpus, fakes["base"], fakes["clean"], None)
-    assert h.main_with_argv(argv) == 2
+if args[0] == "check":
+    if not all(f in args for f in ("--select", "--fix", "--unsafe-fixes", "--config")):
+        sys.stderr.write("fake-ruff: check missing expected flags: %r\\n" % (args,))
+        sys.exit(3)
+    if STDERR_TEXT:
+        sys.stderr.write(STDERR_TEXT)
+    for p in sorted(pathlib.Path(".").glob("*.py")):
+        p.write_text(_apply_check(p.read_text(encoding="utf-8")), encoding="utf-8")
+    if CONVERGE_FAIL or (CONVERGE_ON and any(p.match(CONVERGE_ON) for p in sorted(pathlib.Path(".").glob("*.py")))):
+        sys.stderr.write(
+            "debug error: Failed to converge after 100 iterations in "
+            "`case.py` with rule codes E302\\n"
+        )
+    print("Found 1 error (1 fixed, 0 remaining).")
+    sys.exit(0)
+
+if args[0] == "format":
+    if "--config" not in args:
+        sys.stderr.write("fake-ruff: format missing --config: %r\\n" % (args,))
+        sys.exit(3)
+    for p in sorted(pathlib.Path(".").glob("*.py")):
+        s = p.read_text(encoding="utf-8")
+        if FMT_MARKER and FMT_MARKER not in s:
+            p.write_text(s.rstrip("\\n") + "\\n" + FMT_MARKER + "\\n", encoding="utf-8")
+    print("1 file reformatted")
+    sys.exit(0)
+
+sys.stderr.write("fake-ruff: unsupported subcommand: %r\\n" % (args,))
+sys.exit(3)
+'''
 
 
-def test_collect_copies_python_files(tmp_path, capsys):
-    root = tmp_path / "root" / "pkg"
-    root.mkdir(parents=True)
-    (root / "mod.py").write_text("a=1\n", encoding="utf-8")
-    (root / "notes.txt").write_text("nope", encoding="utf-8")
-    out = tmp_path / "corpus"
-    argv = [
-        "collect",
-        "--out",
-        str(out),
-        "--roots",
-        str(tmp_path / "root"),
-    ]
-    assert h.main_with_argv(argv) == 0
-    assert (out / "pkg" / "mod.py").exists()
-    assert not (out / "pkg" / "notes.txt").exists()
+_FAKE_CACHE: dict[tuple, Path] = {}
+_TMPDIRS: list[Path] = []
 
 
-def test_fake_binaries_are_hermetic(tmp_path, fakes):
-    """The fake binaries themselves must converge and be idempotent on repeat runs."""
-    for name in ("base", "clean"):
-        work = tmp_path / f"work-{name}"
-        work.mkdir()
-        (work / "case.py").write_text("x=1\n", encoding="utf-8")
-        for _ in range(2):
-            proc = subprocess.run(
-                [str(fakes[name]), "check", "."],
-                cwd=work,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            assert proc.returncode == 0
-    first = (tmp_path / "work-base" / "case.py").read_text()
-    assert "x = 1" in first
+def _temp_root(prefix: str) -> Path:
+    root = Path(tempfile.mkdtemp(prefix=prefix))
+    _TMPDIRS.append(root)
+    return root
 
 
-def test_cli_help_exits_zero():
-    proc = subprocess.run(
-        [sys.executable, str(REPO / "ruff_difftest.py"), "--help"],
-        capture_output=True,
-        text=True,
-        check=False,
+@atexit.register
+def _cleanup_fakes() -> None:
+    for root in _TMPDIRS:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def make_fake(
+    directory: Path,
+    name: str,
+    *,
+    fix_kind: str = "normalize",
+    append_each_run: bool = False,
+    converge_fail: bool = False,
+    converge_on: str | None = None,
+    fmt_marker: str | None = None,
+    stderr_text: str | None = None,
+    sleep: float = 0.0,
+    log: Path | None = None,
+    interpreter: str | None = None,
+    reuse: bool = True,
+) -> Path:
+    """Write an executable fake ruff binary with the given baked-in behavior.
+
+    With `reuse=True` (the default) identical behavior maps to one cached
+    file: a fake holds no state between runs, so sharing it across tests is
+    safe, and it avoids paying macOS's first-exec verification cost (~250ms
+    for a freshly written executable) once per test instead of once per suite.
+    Set `reuse=False` when a test needs a genuinely private binary.
+    """
+    key = (
+        fix_kind,
+        append_each_run,
+        converge_fail,
+        converge_on,
+        fmt_marker,
+        stderr_text,
+        sleep,
+        str(log) if log else None,
+        interpreter or sys.executable,
     )
-    assert proc.returncode == 0
-    assert "run" in proc.stdout
-    assert "collect" in proc.stdout
+    if reuse and log is None:
+        cached = _FAKE_CACHE.get(key)
+        if cached is not None and cached.is_file():
+            return cached
+        # Derive the filename from the behavior so that two different fakes
+        # can never collide on one path (and overwrite each other's cache
+        # entry). `name` is only a label for the first write of a behavior.
+        name = "fake_" + hashlib.sha1(repr(key).encode()).hexdigest()[:16]
+        path = directory / name
+    else:
+        path = directory / name
+    path.write_text(
+        FAKE_TEMPLATE.format(
+            interpreter=interpreter or sys.executable,
+            fix_kind=fix_kind,
+            converge_fail=converge_fail,
+            converge_on=converge_on,
+            append_each_run=append_each_run,
+            fmt_marker=fmt_marker,
+            stderr_text=stderr_text,
+            sleep=sleep,
+            log=str(log) if log else None,
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    if reuse and log is None:
+        _FAKE_CACHE[key] = path
+    return path
+
+
+class HarnessTestCase(unittest.TestCase):
+    """Temp-dir scaffolding shared by every test."""
+
+    # Fakes are stateless, so all tests share one pool directory (outside any
+    # per-test temp dir) instead of paying first-exec cost per test.
+    POOL = _temp_root("ruff-difftest-fakes-")
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="ruff-difftest-unittest-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.bin_dir = self.POOL
+
+    # -- fixtures -------------------------------------------------------
+    def fake(self, name: str, **kw) -> Path:
+        """A fake ruff binary. Same behavior => same cached file."""
+        return make_fake(self.bin_dir, name, **kw)
+
+    def corpus(
+        self,
+        name: str = "corpus",
+        files: dict[str, str] | None = None,
+        content: str = "x=1\n",
+    ) -> Path:
+        """Create a corpus dir. `files` maps relative posix path -> content."""
+        root = self.tmp / name
+        root.mkdir(parents=True, exist_ok=True)
+        files = {"case.py": content} if files is None else files
+        for rel, text in files.items():
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        return root
+
+    def config(self, corpus: Path, name: str = "ruff_difftest.toml") -> Path:
+        """Write the per-run ruff config the harness threads to both builds."""
+        cfg = corpus / name
+        cfg.write_text("preview = true\n", encoding="utf-8")
+        return cfg
+
+    def source_tree(self) -> Path:
+        """A nested source tree for `collect`: 3 .py files + 2 non-.py decoys."""
+        root = self.tmp / "src"
+        (root / "pkg" / "deep").mkdir(parents=True, exist_ok=True)
+        (root / "top.py").write_text("x=1\n", encoding="utf-8")
+        (root / "pkg" / "mod.py").write_text("y=2\n", encoding="utf-8")
+        (root / "pkg" / "deep" / "deeper.py").write_text("z=3\n", encoding="utf-8")
+        (root / "notes.txt").write_text("not python\n", encoding="utf-8")
+        (root / "pkg" / "README.md").write_text("nope\n", encoding="utf-8")
+        return root
+
+    # -- driving the harness -------------------------------------------
+    def run_harness(
+        self,
+        argv: list[str],
+        *,
+        expect: int | None = 0,
+    ) -> tuple[int, str]:
+        """Call main_with_argv in-process, capturing stdout/stderr."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = h.main_with_argv(argv)
+        text = out.getvalue() + err.getvalue()
+        if expect is not None:
+            self.assertEqual(expect, code, msg=f"argv={argv}\noutput:\n{text}")
+        return code, text
+
+    def run_mode(
+        self,
+        corpus: Path,
+        base: Path,
+        fixed: Path,
+        *,
+        report: bool = True,
+        select: str = "E301,E302,I001",
+        jobs: int = 2,
+    ) -> tuple[Path | None, dict, list]:
+        """Run the harness `run` subcommand; return (report_dir, summary, rows)."""
+        report_dir = self.tmp / "report" if report else None
+        argv = [
+            "run",
+            "--corpus",
+            str(corpus),
+            "--base",
+            str(base),
+            "--fixed",
+            str(fixed),
+            "--select",
+            select,
+            "--jobs",
+            str(jobs),
+        ]
+        if report_dir is not None:
+            argv += ["--report", str(report_dir)]
+        self.run_harness(argv)
+        if report_dir is None:
+            return None, {}, []
+        return (
+            report_dir,
+            json.loads((report_dir / "summary.json").read_text(encoding="utf-8")),
+            json.loads((report_dir / "results.json").read_text(encoding="utf-8")),
+        )
+
+
+class TestNoDivergence(HarnessTestCase):
+    """(a) Builds that behave identically must report no divergence."""
+
+    def test_identical_builds_report_nothing(self):
+        corpus = self.corpus()
+        base = self.fake("ruff_base")
+        fixed = self.fake("ruff_fixed")
+        report_dir, summary, rows = self.run_mode(corpus, base, fixed)
+
+        self.assertEqual(1, summary["corpus_size"])
+        self.assertEqual(0, summary["differing_files"])
+        self.assertEqual(0, summary["base_converge_failures"])
+        self.assertEqual(0, summary["fixed_converge_failures"])
+        self.assertEqual(0, summary["base_non_idempotent"])
+        self.assertEqual(0, summary["fixed_non_idempotent"])
+        self.assertEqual(0, summary["errors"])
+        self.assertEqual(0, summary["diffs_formatter_disagrees_both"])
+        self.assertEqual(0, summary["diffs_formatter_disagrees_only_fixed"])
+        # No file is "interesting", so results.json is an empty list.
+        self.assertEqual([], rows)
+        self.assertTrue((report_dir / "summary.json").is_file())
+        self.assertTrue((report_dir / "results.json").is_file())
+
+    def test_identical_behavior_across_several_files(self):
+        corpus = self.corpus(
+            files={
+                "case.py": "x=1\n",
+                "pkg/nested.py": "x=1\n",
+                "pkg/deep/deeper.py": "x=1\n",
+            }
+        )
+        base = self.fake("ruff_base")
+        fixed = self.fake("ruff_fixed")
+        _report, summary, rows = self.run_mode(corpus, base, fixed)
+        self.assertEqual(3, summary["corpus_size"])
+        self.assertEqual(0, summary["differing_files"])
+        self.assertEqual([], rows)
+
+    def test_file_result_defaults_for_quiet_builds(self):
+        """A quiet pair yields all-False flags and None format attribution."""
+        corpus = self.corpus()
+        result = h.check_file(
+            "case.py",
+            corpus,
+            self.fake("ruff_base"),
+            self.fake("ruff_fixed"),
+            "E301",
+            self.config(corpus),
+            self.tmp,
+        )
+        self.assertEqual("case.py", result.path)
+        self.assertFalse(result.outputs_differ)
+        self.assertFalse(result.base_converge_fail)
+        self.assertFalse(result.fixed_converge_fail)
+        self.assertFalse(result.base_non_idempotent)
+        self.assertFalse(result.fixed_non_idempotent)
+        # format is only probed for DIFF files -> attribution stays None
+        self.assertIsNone(result.base_format_disagrees)
+        self.assertIsNone(result.fixed_format_disagrees)
+        self.assertIsNone(result.error)
+
+
+class TestOutputDrift(HarnessTestCase):
+    """(b) A fixed build whose output differs must set outputs_differ."""
+
+    def test_drifting_build_sets_outputs_differ(self):
+        corpus = self.corpus()
+        base = self.fake("ruff_base")
+        fixed = self.fake("ruff_fixed", fix_kind="drift")
+        _report, summary, rows = self.run_mode(corpus, base, fixed)
+
+        self.assertEqual(1, summary["differing_files"])
+        self.assertEqual(0, summary["base_converge_failures"])
+        self.assertEqual(0, summary["fixed_converge_failures"])
+        self.assertEqual(1, len(rows))
+        self.assertEqual("case.py", rows[0]["path"])
+        self.assertIs(True, rows[0]["outputs_differ"])
+
+    def test_drift_is_attributed_patched_only_when_format_disagrees(self):
+        """Drift in check only: neither build's formatter disagrees."""
+        corpus = self.corpus()
+        base = self.fake("ruff_base")
+        fixed = self.fake("ruff_fixed", fix_kind="drift")
+        _report, summary, rows = self.run_mode(corpus, base, fixed)
+
+        self.assertEqual(1, summary["differing_files"])
+        self.assertEqual(0, summary["diffs_formatter_disagrees_both"])
+        self.assertEqual(0, summary["diffs_formatter_disagrees_only_fixed"])
+        self.assertIs(False, rows[0]["base_format_disagrees"])
+        self.assertIs(False, rows[0]["fixed_format_disagrees"])
+
+    def test_formatter_disagreement_patched_only(self):
+        """Candidate regression: only the patched build's format disagrees.
+
+        base normalizes `x=1` -> `x = 1`; fixed turns it into `x = 2` AND its
+        formatter appends a marker. The outputs differ (so attribution runs),
+        and only the fixed build's `check --fix` output disagrees with its own
+        `format` -> the "regression?" bucket.
+        """
+        corpus = self.corpus()
+        base = self.fake("ruff_base")
+        fixed = self.fake("ruff_fixed", fix_kind="drift", fmt_marker="# FMTDRIFT")
+        _report, summary, rows = self.run_mode(corpus, base, fixed)
+
+        self.assertEqual(1, summary["differing_files"])
+        self.assertEqual(1, summary["diffs_formatter_disagrees_only_fixed"])
+        self.assertEqual(0, summary["diffs_formatter_disagrees_both"])
+        self.assertIs(False, rows[0]["base_format_disagrees"])
+        self.assertIs(True, rows[0]["fixed_format_disagrees"])
+
+    def test_formatter_disagreement_pre_existing_in_both(self):
+        """Both builds disagree with their own formatter -> pre-existing."""
+        corpus = self.corpus()
+        base = self.fake("ruff_base", fmt_marker="# FMTDRIFT")
+        fixed = self.fake("ruff_fixed", fix_kind="drift", fmt_marker="# FMTDRIFT")
+        _report, summary, rows = self.run_mode(corpus, base, fixed)
+
+        self.assertEqual(1, summary["differing_files"])
+        self.assertEqual(1, summary["diffs_formatter_disagrees_both"])
+        self.assertEqual(0, summary["diffs_formatter_disagrees_only_fixed"])
+        self.assertIs(True, rows[0]["base_format_disagrees"])
+        self.assertIs(True, rows[0]["fixed_format_disagrees"])
+
+    def test_format_attribution_is_skipped_for_quiet_files(self):
+        """Attribution runs only for DIFF files -> None stays None.
+
+        Guards the `if result.outputs_differ:` gate in check_file: a quiet
+        pair must never pay for (or record) a format probe.
+        """
+        corpus = self.corpus()
+        log = self.tmp / "argv.log"
+        base = self.fake("ruff_base", log=log, fmt_marker="# FMTDRIFT")
+        fixed = self.fake("ruff_fixed", log=log, fmt_marker="# FMTDRIFT")
+        result = h.check_file(
+            "case.py",
+            corpus,
+            base,
+            fixed,
+            "E301",
+            self.config(corpus),
+            self.tmp,
+        )
+
+        self.assertFalse(result.outputs_differ)
+        self.assertIsNone(result.base_format_disagrees)
+        self.assertIsNone(result.fixed_format_disagrees)
+        invocations = log.read_text(encoding="utf-8").splitlines()
+        # 2 builds x 2 check passes, and no `format` probe at all.
+        self.assertEqual(4, len(invocations))
+        self.assertEqual([], [line for line in invocations if line.startswith("format")])
+
+    def test_run_protocol_check_passes_and_config(self):
+        """Two check passes per build; argv matches the documented shape."""
+        corpus = self.corpus()
+        log = self.tmp / "argv.log"
+        base = self.fake("ruff_base", log=log)
+        fixed = self.fake("ruff_fixed", log=log)
+        self.run_mode(corpus, base, fixed, select="E301,E302")
+
+        invocations = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(4, len(invocations), msg="\n".join(invocations))
+        for line in invocations:
+            argv = line.split()
+            self.assertEqual("check", argv[0])
+            self.assertEqual(".", argv[1])
+            self.assertEqual(
+                ["--select", "E301,E302", "--fix", "--unsafe-fixes", "--config"],
+                argv[2:7],
+                msg=line,
+            )
+            self.assertEqual("ruff.toml", Path(argv[7]).name, msg=line)
+
+
+class TestConvergence(HarnessTestCase):
+    """(c) "Failed to converge" on stderr flags the correct build only."""
+
+    def test_fixed_build_converge_failure(self):
+        corpus = self.corpus()
+        base = self.fake("ruff_base")
+        fixed = self.fake("ruff_fixed", converge_fail=True)
+        _report, summary, rows = self.run_mode(corpus, base, fixed)
+
+        self.assertEqual(1, summary["fixed_converge_failures"])
+        self.assertEqual(0, summary["base_converge_failures"])
+        # Content still matches, so this isolates the flag from drift.
+        self.assertEqual(0, summary["differing_files"])
+        self.assertIs(True, rows[0]["fixed_converge_fail"])
+        self.assertIs(False, rows[0]["base_converge_fail"])
+
+    def test_base_build_converge_failure(self):
+        corpus = self.corpus()
+        base = self.fake("ruff_base", converge_fail=True)
+        fixed = self.fake("ruff_fixed")
+        _report, summary, rows = self.run_mode(corpus, base, fixed)
+
+        self.assertEqual(1, summary["base_converge_failures"])
+        self.assertEqual(0, summary["fixed_converge_failures"])
+        self.assertIs(True, rows[0]["base_converge_fail"])
+        self.assertIs(False, rows[0]["fixed_converge_fail"])
+
+    def test_asymmetric_failures_are_attributed_per_file(self):
+        """The README's flagship case: `base=1 fixed=1` hiding *which* file.
+
+        Two builds fail to converge once each, on different files, and a third
+        file converges in both. The counts look symmetric and uninformative;
+        per-file attribution is the whole point of the harness.
+        """
+        corpus = self.corpus(
+            files={
+                "base_only.py": "a=1\n",
+                "fixed_only.py": "b=2\n",
+                "quiet.py": "c=3\n",
+            }
+        )
+        base = self.fake("ruff_base", converge_on="base_only.py")
+        fixed = self.fake("ruff_fixed", converge_on="fixed_only.py")
+        _report, summary, rows = self.run_mode(corpus, base, fixed)
+
+        # Symmetric counts...
+        self.assertEqual(1, summary["base_converge_failures"])
+        self.assertEqual(1, summary["fixed_converge_failures"])
+        self.assertEqual(3, summary["corpus_size"])
+        # ...but the attribution is not.
+        by_path = {r["path"]: r for r in rows}
+        self.assertEqual({"base_only.py", "fixed_only.py"}, set(by_path))
+        self.assertIs(True, by_path["base_only.py"]["base_converge_fail"])
+        self.assertIs(False, by_path["base_only.py"]["fixed_converge_fail"])
+        self.assertIs(False, by_path["fixed_only.py"]["base_converge_fail"])
+        self.assertIs(True, by_path["fixed_only.py"]["fixed_converge_fail"])
+        self.assertFalse(by_path["base_only.py"]["outputs_differ"])
+        self.assertFalse(by_path["fixed_only.py"]["outputs_differ"])
+
+    def test_fix_snapshot_reads_marker_from_stderr(self):
+        """fix_snapshot's convergence contract, checked directly."""
+        work = self.tmp / "snap"
+        work.mkdir()
+        target = work / "case.py"
+        target.write_text("x=1\n", encoding="utf-8")
+        cfg = work / "ruff.toml"
+        cfg.write_text("preview = true\n", encoding="utf-8")
+
+        clean = self.fake("ruff_clean")
+        noisy = self.fake("ruff_noisy", converge_fail=True)
+
+        content, converged, failure = h.fix_snapshot(clean, target, "E301", cfg)
+        self.assertTrue(converged)
+        self.assertIsNone(failure)
+        self.assertEqual("x = 1\n", content)
+
+        target.write_text("x=1\n", encoding="utf-8")
+        content, converged, failure = h.fix_snapshot(noisy, target, "E301", cfg)
+        self.assertFalse(converged)
+        self.assertIsNone(failure, "a convergence failure is a verdict, not a harness error")
+        self.assertEqual("x = 1\n", content)
+
+
+class TestIdempotence(HarnessTestCase):
+    """(d) A build whose second --fix still mutates is non-idempotent."""
+
+    def test_still_mutating_on_second_pass_is_flagged(self):
+        corpus = self.corpus()
+        base = self.fake("ruff_base")
+        fixed = self.fake("ruff_fixed", append_each_run=True)
+        _report, summary, rows = self.run_mode(corpus, base, fixed)
+
+        self.assertEqual(1, summary["fixed_non_idempotent"])
+        self.assertEqual(0, summary["base_non_idempotent"])
+        self.assertIs(True, rows[0]["fixed_non_idempotent"])
+        self.assertIs(False, rows[0]["base_non_idempotent"])
+
+    def test_base_build_non_idempotence_is_attributed_to_base(self):
+        corpus = self.corpus()
+        base = self.fake("ruff_base", append_each_run=True)
+        fixed = self.fake("ruff_fixed")
+        _report, summary, rows = self.run_mode(corpus, base, fixed)
+
+        self.assertEqual(1, summary["base_non_idempotent"])
+        self.assertEqual(0, summary["fixed_non_idempotent"])
+        self.assertIs(True, rows[0]["base_non_idempotent"])
+        self.assertIs(False, rows[0]["fixed_non_idempotent"])
+
+    def test_both_builds_non_idempotent(self):
+        corpus = self.corpus()
+        base = self.fake("ruff_base", append_each_run=True)
+        fixed = self.fake("ruff_fixed", append_each_run=True)
+        _report, summary, _rows = self.run_mode(corpus, base, fixed)
+
+        self.assertEqual(1, summary["base_non_idempotent"])
+        self.assertEqual(1, summary["fixed_non_idempotent"])
+
+    def test_change_then_stable_is_NOT_flagged(self):
+        """First --fix mutates, second is a no-op -> that IS idempotent.
+
+        Pins the actual contract in check_file: the flag means the *second*
+        pass still changed something (`first != second`).
+        """
+        corpus = self.corpus()
+        base = self.fake("ruff_base")
+        # normalize: run 1 rewrites x=1 -> x = 1; run 2 finds nothing to do.
+        fixed = self.fake("ruff_fixed")
+        _report, summary, rows = self.run_mode(corpus, base, fixed)
+
+        self.assertEqual(0, summary["fixed_non_idempotent"])
+        self.assertEqual(0, summary["base_non_idempotent"])
+        self.assertEqual([], rows)
+
+    def test_snapshot_content_proves_second_pass_differs(self):
+        """Direct fix_snapshot demo of the non-idempotent mechanism."""
+        work = self.tmp / "direct"
+        work.mkdir()
+        target = work / "case.py"
+        target.write_text("x=1\n", encoding="utf-8")
+        cfg = work / "ruff.toml"
+        cfg.write_text("preview = true\n", encoding="utf-8")
+
+        first, conv1, _ = h.fix_snapshot(
+            self.fake("ruff_noisy", append_each_run=True), target, "E301", cfg
+        )
+        second, _, _ = h.fix_snapshot(
+            self.fake("ruff_noisy2", append_each_run=True), target, "E301", cfg
+        )
+        self.assertTrue(conv1)
+        self.assertEqual("x = 1\n# extra\n", first)
+        self.assertEqual("x = 1\n# extra\n# extra\n", second)
+        self.assertNotEqual(first, second)
+
+
+class TestTimeoutPath(HarnessTestCase):
+    """run_ruff's timeout sentinel and what fix_snapshot does with it."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved_timeout = h.FIX_TIMEOUT_S
+        h.FIX_TIMEOUT_S = 0.25
+        self.addCleanup(setattr, h, "FIX_TIMEOUT_S", self._saved_timeout)
+
+    def _work(self):
+        work = self.tmp / "tmo"
+        work.mkdir(exist_ok=True)
+        target = work / "case.py"
+        target.write_text("x=1\n", encoding="utf-8")
+        cfg = work / "ruff.toml"
+        cfg.write_text("preview = true\n", encoding="utf-8")
+        return target, cfg
+
+    def test_run_ruff_returns_timeout_sentinel(self):
+        target, cfg = self._work()
+        slow = self.fake("ruff_slow", sleep=5.0)
+        started = time.monotonic()
+        code, out, err = h.run_ruff(slow, target.parent, "E301", cfg)
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 4.0, msg="timeout was not enforced")
+        self.assertEqual(-1, code)
+        self.assertEqual("", out)
+        self.assertIn("TIMEOUT", err)
+        self.assertNotIn(h.FAILURES_HELP, err)
+
+    def test_timeout_is_not_counted_as_converged(self):
+        """A timed-out run is not a settled fix, and says so.
+
+        Regression test. This used to report `converged=True` for a hung
+        binary: fix_snapshot decided convergence from the stderr marker alone,
+        and the timeout sentinel deliberately omits that marker. A killed
+        process therefore looked exactly like a clean run, and its half-fixed
+        output was snapshotted and compared as if it were a real result.
+        """
+        target, cfg = self._work()
+        slow = self.fake("ruff_slow", sleep=5.0)
+        _content, converged, failure = h.fix_snapshot(slow, target, "E301", cfg)
+
+        self.assertFalse(converged, "a timeout must not read as a settled fix")
+        self.assertIsNotNone(failure)
+        assert failure is not None
+        self.assertIn("timed out", failure)
+
+
+class TestBadSelectorPath(HarnessTestCase):
+    """A typo'd selector runs no rules; ruff still exits 0.
+
+    Kept out of TestTimeoutPath because that class shrinks FIX_TIMEOUT_S, and
+    a freshly written fake's first exec can exceed a fraction of a second.
+    """
+
+    def test_unknown_selector_is_reported_even_though_ruff_exits_zero(self):
+        """ruff accepts an unknown selector with a warning and a success code.
+
+        Both builds then "agree" on unfixed input, so the run looks clean and
+        a regression gate passes on a run where nothing was ever linted. The
+        stderr warning is the only evidence available.
+        """
+        work = self.tmp / "selector"
+        work.mkdir()
+        target = work / "case.py"
+        target.write_text("x=1\n", encoding="utf-8")
+        cfg = work / "ruff.toml"
+        cfg.write_text("preview = true\n", encoding="utf-8")
+
+        warns = self.fake(
+            "ruff_badselector",
+            stderr_text=f"warning: {h.UNKNOWN_SELECTOR_MARKER} `E9999` in `select` from the CLI\n",
+        )
+        _content, converged, failure = h.fix_snapshot(warns, target, "E9999", cfg)
+
+        self.assertFalse(converged)
+        self.assertIsNotNone(failure)
+        assert failure is not None
+        self.assertIn("no such rule", failure)
+
+
+class TestReportArtifacts(HarnessTestCase):
+    """(e) summary.json / results.json are written with the promised keys."""
+
+    def test_summary_json_has_all_promised_keys(self):
+        corpus = self.corpus()
+        base = self.fake("ruff_base")
+        fixed = self.fake("ruff_fixed", fix_kind="drift")
+        report_dir, summary, _rows = self.run_mode(corpus, base, fixed)
+
+        assert_summary_keys(self, summary)
+        self.assertEqual(1, summary["corpus_size"])
+        self.assertEqual("E301,E302,I001", summary["select"])
+        self.assertEqual(1, summary["differing_files"])
+        on_disk = json.loads((report_dir / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary, on_disk)
+
+    def test_results_json_row_schema_and_filter(self):
+        """Only interesting files land in results.json, with full schema."""
+        corpus = self.corpus(
+            files={"quiet.py": "x=1\n", "drifts.py": "x=1\n"}
+        )
+        # One build drifts on every file, so to get a *mix* we drive check_file
+        # per file with distinct binaries instead.
+        results = []
+        for rel, binary in (
+            ("quiet.py", self.fake("ruff_q")),
+            ("drifts.py", self.fake("ruff_d", fix_kind="drift")),
+        ):
+            results.append(
+                h.check_file(
+                    rel,
+                    corpus,
+                    self.fake(f"ruff_base_{rel}"),
+                    binary,
+                    "E301",
+                    self.config(corpus),
+                    self.tmp,
+                )
+            )
+        report = h.Report(corpus_size=2, select="E301")
+        report.results = results
+        interesting = [r for r in report.results if h._interesting(r)]
+
+        self.assertEqual(["drifts.py"], [r.path for r in interesting])
+        row = interesting[0].__dict__
+        assert_result_keys(self, row)
+        self.assertIs(True, row["outputs_differ"])
+
+    def test_summary_counts_aggregate_across_files(self):
+        corpus = self.corpus(
+            files={
+                "quiet.py": "x=1\n",
+                "drift.py": "y=2\n",
+                "noisy.py": "z=3\n",
+            }
+        )
+        base = self.fake("ruff_base", converge_fail=True)
+        fixed = self.fake(
+            "ruff_fixed",
+            fix_kind="drift",
+            append_each_run=True,
+            converge_fail=True,
+        )
+        _report, summary, rows = self.run_mode(corpus, base, fixed)
+
+        self.assertEqual(3, summary["corpus_size"])
+        self.assertEqual(3, summary["base_converge_failures"])
+        self.assertEqual(3, summary["fixed_converge_failures"])
+        self.assertEqual(3, summary["fixed_non_idempotent"])
+        self.assertEqual(3, summary["differing_files"])
+        self.assertEqual(3, len(rows))
+        for row in rows:
+            self.assertIs(True, row["base_converge_fail"])
+            self.assertIs(True, row["fixed_converge_fail"])
+            self.assertIs(True, row["fixed_non_idempotent"])
+            self.assertFalse(row["base_non_idempotent"])
+
+    def test_run_without_report_writes_nothing(self):
+        corpus = self.corpus()
+        report_dir, _summary, _rows = self.run_mode(
+            corpus, self.fake("ruff_b"), self.fake("ruff_f"), report=False
+        )
+        self.assertIsNone(report_dir)
+        self.assertFalse((self.tmp / "report").exists())
+
+    def test_per_run_config_is_cleaned_up(self):
+        corpus = self.corpus()
+        base = self.fake("ruff_base")
+        fixed = self.fake("ruff_fixed")
+        log = self.tmp / "argv.log"
+        self.fake("ruff_probe", log=log)
+        self.run_mode(corpus, base, fixed)
+
+        # The harness writes corpus/ruff_difftest.toml, hands it to each build
+        # (as workdir/ruff.toml) and must remove it afterwards.
+        self.assertFalse((corpus / "ruff_difftest.toml").exists())
+
+
+class TestRegressionGate(HarnessTestCase):
+    """--fail-on-regression: exit 1 only for patched-attributable drift."""
+
+    def _run(self, corpus: Path, base: Path, fixed: Path, *, gate: bool) -> int:
+        argv = [
+            "run",
+            "--corpus",
+            str(corpus),
+            "--base",
+            str(base),
+            "--fixed",
+            str(fixed),
+            "--jobs",
+            "1",
+        ]
+        if gate:
+            argv.append("--fail-on-regression")
+        return self.run_harness(argv, expect=None)[0]
+
+    def test_patched_attributable_drift_fails_the_gate(self):
+        corpus = self.corpus()
+        base = self.fake("ruff_base")
+        fixed = self.fake("ruff_fixed", fix_kind="drift", fmt_marker="# FMTDRIFT")
+        self.assertEqual(1, self._run(corpus, base, fixed, gate=True))
+
+    def test_pre_existing_disagreement_does_not_fail_the_gate(self):
+        """Both builds disagree with their formatter -> not a regression."""
+        corpus = self.corpus()
+        base = self.fake("ruff_base", fmt_marker="# FMTDRIFT")
+        fixed = self.fake("ruff_fixed", fix_kind="drift", fmt_marker="# FMTDRIFT")
+        self.assertEqual(0, self._run(corpus, base, fixed, gate=True))
+
+    def test_clean_run_passes_the_gate(self):
+        corpus = self.corpus()
+        self.assertEqual(
+            0,
+            self._run(corpus, self.fake("ruff_b"), self.fake("ruff_f"), gate=True),
+        )
+
+    def test_gate_is_off_by_default(self):
+        """Without the flag, drift still reports 0: the gate is opt-in."""
+        corpus = self.corpus()
+        base = self.fake("ruff_base")
+        fixed = self.fake("ruff_fixed", fix_kind="drift", fmt_marker="# FMTDRIFT")
+        self.assertEqual(0, self._run(corpus, base, fixed, gate=False))
+
+
+class TestPerFileErrorIsolation(HarnessTestCase):
+    """A broken file must not kill the run or lose the whole report."""
+
+    def test_missing_corpus_file_is_recorded_as_error(self):
+        """mode_run wraps a per-file exception in FileResult.error.
+
+        check_file itself propagates (shutil.copy2 of a nonexistent source),
+        so the isolation guarantee lives in mode_run's future handler. Pinned
+        here against the real exception shape.
+        """
+        corpus = self.corpus(files={"present.py": "x=1\n"})
+        with self.assertRaises((FileNotFoundError, OSError)):
+            h.check_file(
+                "ghost.py",
+                corpus,
+                self.fake("ruff_b"),
+                self.fake("ruff_f"),
+                "E301",
+                self.config(corpus),
+                self.tmp,
+            )
+
+        report = h.Report(corpus_size=1, select="E301")
+        try:
+            raise FileNotFoundError("ghost.py")
+        except Exception as exc:  # same shape as mode_run's handler
+            report.results.append(
+                h.FileResult(path="ghost.py", error=f"EXC: {exc!r}")
+            )
+        summary = report.summary()
+        self.assertEqual(1, summary["errors"])
+        self.assertTrue(h._interesting(report.results[0]))
+
+    def test_run_continues_past_a_failing_file(self):
+        """A build that hard-fails (exit 3, no mutation) is recorded per file.
+
+        The run must survive the broken build and still report every file, but
+        the failure is now recorded as an error rather than passing as a quiet
+        divergence: a build that refused to run is not a verdict, and a
+        regression gate must not read it as one.
+        """
+        corpus = self.corpus(files={"a.py": "x=1\n", "b.py": "x=1\n"})
+        good = self.fake("ruff_good")
+        # reuse=False: this fake is rewritten in place, so it must not be the
+        # shared cached copy that other tests hand to the harness.
+        broken = self.fake("ruff_broken", reuse=False)
+        broken.write_text(
+            broken.read_text(encoding="utf-8").replace(
+                'if args[0] == "check":', 'if True:\n    sys.stderr.write("boom\\n")\n'
+                '    sys.exit(3)\nif args[0] == "check":'
+            ),
+            encoding="utf-8",
+        )
+        report_dir, summary, rows = self.run_mode(corpus, good, broken)
+        self.assertEqual(2, summary["corpus_size"])
+        self.assertEqual(2, summary["errors"])
+        self.assertTrue(all(r["error"] for r in rows))
+        self.assertTrue(all("ruff exited 3" in r["error"] for r in rows))
+        self.assertEqual(2, len(rows))
+        self.assertTrue((report_dir / "results.json").is_file())
+
+    def test_broken_build_fails_a_regression_gate_instead_of_passing(self):
+        """--fail-on-regression must not certify a run it could not judge."""
+        corpus = self.corpus(files={"a.py": "x=1\n"})
+        good = self.fake("ruff_good")
+        broken = self.fake("ruff_broken2", reuse=False)
+        broken.write_text(
+            broken.read_text(encoding="utf-8").replace(
+                'if args[0] == "check":', 'if True:\n    sys.stderr.write("boom\\n")\n'
+                '    sys.exit(3)\nif args[0] == "check":'
+            ),
+            encoding="utf-8",
+        )
+        code, _text = self.run_harness(
+            [
+                "run",
+                "--corpus", str(corpus),
+                "--base", str(good),
+                "--fixed", str(broken),
+                "--fail-on-regression",
+            ],
+            expect=3,
+        )
+        self.assertEqual(3, code, "a broken run must not report success")
+
+    def test_empty_corpus_returns_exit_code_2(self):
+        corpus = self.tmp / "empty"
+        corpus.mkdir()
+        code, text = self.run_harness(
+            [
+                "run",
+                "--corpus",
+                str(corpus),
+                "--base",
+                str(self.fake("ruff_b")),
+                "--fixed",
+                str(self.fake("ruff_f")),
+            ],
+            expect=2,
+        )
+        self.assertIn("no .py files", text)
+
+
+class TestCollect(HarnessTestCase):
+    """(f) The `collect` subcommand copies the corpus correctly."""
+
+    def test_collect_copies_python_files_preserving_layout(self):
+        root = self.source_tree()
+        out = self.tmp / "corpus"
+        _code, text = self.run_harness(
+            ["collect", "--out", str(out), "--roots", str(root)]
+        )
+
+        self.assertIn("copied 3 files", text)
+        self.assertEqual("x=1\n", (out / "top.py").read_text(encoding="utf-8"))
+        self.assertEqual("y=2\n", (out / "pkg" / "mod.py").read_text(encoding="utf-8"))
+        self.assertEqual(
+            "z=3\n", (out / "pkg" / "deep" / "deeper.py").read_text(encoding="utf-8")
+        )
+        # non-.py files are not copied
+        self.assertFalse((out / "notes.txt").exists())
+        self.assertFalse((out / "pkg" / "README.md").exists())
+
+    def test_collect_respects_max_per_root(self):
+        root = self.source_tree()
+        out = self.tmp / "corpus"
+        _code, text = self.run_harness(
+            ["collect", "--out", str(out), "--roots", str(root), "--max-per-root", "2"]
+        )
+        self.assertIn("copied 2 files", text)
+        self.assertEqual(2, len(list(out.rglob("*.py"))))
+
+    def test_collect_multiple_roots_merges(self):
+        root_a = self.tmp / "a"
+        root_b = self.tmp / "b"
+        root_a.mkdir()
+        root_b.mkdir()
+        (root_a / "one.py").write_text("a=1\n", encoding="utf-8")
+        (root_b / "two.py").write_text("b=2\n", encoding="utf-8")
+        out = self.tmp / "corpus"
+        _code, text = self.run_harness(
+            ["collect", "--out", str(out), "--roots", str(root_a), str(root_b)]
+        )
+        self.assertIn("copied 2 files", text)
+        self.assertTrue((out / "one.py").is_file())
+        self.assertTrue((out / "two.py").is_file())
+
+    def test_collected_corpus_feeds_the_run_subcommand(self):
+        """collect -> run end-to-end on fakes (still no real ruff)."""
+        root = self.source_tree()
+        corpus = self.tmp / "corpus"
+        self.run_harness(["collect", "--out", str(corpus), "--roots", str(root)])
+        base = self.fake("ruff_base")
+        fixed = self.fake("ruff_fixed", fix_kind="drift")
+        _report, summary, _rows = self.run_mode(corpus, base, fixed)
+
+        self.assertEqual(3, summary["corpus_size"])
+        self.assertEqual(3, summary["differing_files"])
+
+
+class TestCliSubprocess(HarnessTestCase):
+    """The CLI as a real process: argv parsing, exit codes, stdout."""
+
+    def _cli(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(REPO / "ruff_difftest.py"), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_help_exits_zero_and_lists_subcommands(self):
+        proc = self._cli("--help")
+        self.assertEqual(0, proc.returncode, msg=proc.stderr)
+        self.assertIn("run", proc.stdout)
+        self.assertIn("collect", proc.stdout)
+
+    def test_missing_subcommand_exits_two(self):
+        proc = self._cli()
+        self.assertEqual(2, proc.returncode)
+
+    def test_collect_via_cli(self):
+        root = self.source_tree()
+        out = self.tmp / "corpus"
+        proc = self._cli("collect", "--out", str(out), "--roots", str(root))
+        self.assertEqual(0, proc.returncode, msg=proc.stderr)
+        self.assertIn("copied 3 files", proc.stdout)
+        self.assertTrue((out / "pkg" / "mod.py").is_file())
+
+    def test_run_via_cli_writes_report(self):
+        corpus = self.corpus()
+        base = self.fake("ruff_base")
+        fixed = self.fake("ruff_fixed", converge_fail=True)
+        report = self.tmp / "cli-report"
+        proc = self._cli(
+            "run",
+            "--corpus",
+            str(corpus),
+            "--base",
+            str(base),
+            "--fixed",
+            str(fixed),
+            "--report",
+            str(report),
+        )
+        self.assertEqual(0, proc.returncode, msg=proc.stderr)
+        self.assertIn("converge failures: base=0 fixed=1", proc.stdout)
+        self.assertIn("== summary ==", proc.stdout)
+        summary = json.loads((report / "summary.json").read_text(encoding="utf-8"))
+        assert_summary_keys(self, summary)
+        rows = json.loads((report / "results.json").read_text(encoding="utf-8"))
+        self.assertEqual(1, len(rows))
+        assert_result_keys(self, rows[0])
+
+
+class TestSuiteSpeed(unittest.TestCase):
+    """Guard the suite's own hermetic promise."""
+
+    def test_suite_imports_stdlib_only(self):
+        """No third-party imports: the suite must run on a bare interpreter."""
+        src = Path(__file__).read_text(encoding="utf-8")
+        # Ignore the fake-binary template: its imports are emitted as text into
+        # a generated script, not imported by this module.
+        start = src.index("FAKE_TEMPLATE =")
+        end = src.index("def make_fake(")
+        src = src[:start] + src[end:]
+        imported = set()
+        for line in src.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("import "):
+                imported.add(stripped.split()[1].split(".")[0])
+            elif stripped.startswith("from ") and " import " in stripped:
+                imported.add(stripped.split()[1].split(".")[0])
+        allowed = {
+            "atexit", "contextlib", "hashlib", "io", "json", "shutil", "stat",
+            "subprocess", "sys", "tempfile", "time", "unittest", "pathlib",
+            "__future__", "ruff_difftest",
+        }
+        self.assertEqual(set(), imported - allowed, msg="non-stdlib import added")
+
+    def test_fake_binaries_live_outside_the_repo(self):
+        """Tests must never leave fake binaries in the checkout."""
+        self.assertEqual([], list(REPO.glob("tests/ruff_*")))
+
+
+def suite_not_importable_hint() -> str:  # pragma: no cover - documentation
+    return (
+        "Use: uv run python -m unittest discover -s tests "
+        "-p 'test_ruff_difftest.py' -v"
+    )
+
+
+if __name__ == "__main__":
+    print(suite_not_importable_hint(), file=sys.stderr)
+    unittest.main(verbosity=2)
