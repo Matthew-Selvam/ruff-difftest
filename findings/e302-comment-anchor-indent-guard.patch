@@ -1,8 +1,8 @@
 diff --git a/crates/ruff_linter/src/rules/pycodestyle/rules/blank_lines.rs b/crates/ruff_linter/src/rules/pycodestyle/rules/blank_lines.rs
-index 5eead58..0c2f8c7 100644
+index 5eead58..beb7a65 100644
 --- a/crates/ruff_linter/src/rules/pycodestyle/rules/blank_lines.rs
 +++ b/crates/ruff_linter/src/rules/pycodestyle/rules/blank_lines.rs
-@@ -813,22 +813,21 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+@@ -813,22 +813,22 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
              }
  
              if logical_line.is_comment_only {
@@ -21,25 +21,26 @@ index 5eead58..0c2f8c7 100644
 -                    );
 -                }
 +                // Track the start of the comment group that directly precedes the current line,
-+                // together with the indentation of the group's last comment. A blank line ends
++                // together with the indentation of the group's first comment. A blank line ends
 +                // the previous group, since the comments after it belong to the definition
 +                // rather than to the statement above.
 +                let comment_start = self
 +                    .locator
 +                    .line_start(logical_line.first_token_range.start());
-+                let start = match state.comment_block {
-+                    // A comment that directly follows another comment belongs to the same group.
-+                    Some((start, _)) if logical_line.blank_lines == 0 => start,
-+                    _ => comment_start,
++                // A comment on the line right after another comment continues the same
++                // group, so it keeps the group's original start and indentation. Only a
++                // comment preceded by a blank line begins a new group.
++                state.comment_block = match state.comment_block {
++                    Some(block) if logical_line.blank_lines == 0 => Some(block),
++                    _ => Some((comment_start, logical_line.indent_length)),
 +                };
-+                state.comment_block = Some((start, logical_line.indent_length));
              } else {
 -                state.comment_block_start = None;
 +                state.comment_block = None;
  
                  state.is_not_first_logical_line = true;
  
-@@ -878,7 +877,7 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+@@ -878,7 +878,7 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
              {
                  diagnostic.set_fix(Fix::safe_edit(Edit::insertion(
                      self.stylist.line_ending().to_string(),
@@ -48,7 +49,7 @@ index 5eead58..0c2f8c7 100644
                  )));
              }
          }
-@@ -950,7 +949,7 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+@@ -950,7 +950,7 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
                                  - line.preceding_blank_lines.count())
                                  as usize,
                          ),
@@ -57,13 +58,13 @@ index 5eead58..0c2f8c7 100644
                      )));
                  }
              }
-@@ -1109,10 +1108,11 @@ struct BlankLinesState {
+@@ -1109,10 +1109,11 @@ struct BlankLinesState {
      /// Used for the fix in case a comment separates two non-comment logical lines to make the comment "stick"
      /// to the second line instead of the first.
      last_non_comment_line_end: TextSize,
 -    /// The start of the comment group that directly precedes the current logical line, if any.
 +    /// The start of the comment group that directly precedes the current logical line, if any,
-+    /// together with the indentation of the group's last comment line.
++    /// together with the indentation of the group's first comment line.
      /// E301 and E302 anchor their insertions here so that the blank lines they add land before the
      /// comment block instead of between the preceding statement and the block.
 -    comment_block_start: Option<TextSize>,
@@ -71,24 +72,24 @@ index 5eead58..0c2f8c7 100644
      previous_unindented_line_kind: Option<LogicalLineKind>,
  }
  
-@@ -1123,9 +1123,22 @@ impl BlankLinesState {
+@@ -1123,9 +1124,22 @@ impl BlankLinesState {
      /// block. Inserting them at the end of the preceding statement instead would separate the
      /// comments from the definition, which both isort and the formatter then move back, so the
      /// two rules would never converge.
 -    fn blank_line_insertion_offset(&self) -> TextSize {
 -        self.comment_block_start
 -            .unwrap_or(self.last_non_comment_line_end)
-+    ///
-+    /// That only holds when the comments are written at the definition's own indentation: a
-+    /// comment indented like the preceding suite (e.g. a trailing comment inside the previous
-+    /// function's body) stays with that body, so anchoring at the comment would place the blank
-+    /// lines inside it, where E303 removes them again and E302 re-inserts them forever. In that
-+    /// case, fall back to the end of the last non-comment line, which puts the blank lines
-+    /// between the comment and the definition.
 +    fn blank_line_insertion_offset(&self, following_indent_length: usize) -> TextSize {
 +        match self.comment_block {
-+            Some((start, last_comment_indent))
-+                if last_comment_indent == following_indent_length =>
++            // Only anchor at the comment block when the block is written at the same
++            // indentation as the definition it documents. A block that starts inside the
++            // preceding suite — a trailing comment in the previous function's body, with or
++            // without a blank line above it — belongs to that suite, so anchoring there would
++            // push the blank lines inside the body, where E303 deletes them and E302 puts
++            // them back, forever. Fall back to the end of the last non-comment line, which
++            // puts the blank lines between the comment and the definition.
++            Some((start, first_comment_indent))
++                if first_comment_indent == following_indent_length =>
 +            {
 +                start
 +            }
